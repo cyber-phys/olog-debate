@@ -1,6 +1,7 @@
 use openai_api_rs::v1::api::Client;
 use openai_api_rs::v1::chat_completion::{self, ChatCompletionRequest};
 use openai_api_rs::v1::common::GPT4;
+use std::io::{self, Read};
 use std::env;
 use uuid::Uuid;
 
@@ -49,9 +50,14 @@ fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Err
 }
 
 fn main() {
-    println!("Hello, world!");
-    get_openai_response(String::from("What is an ontology?"))
+    let prompt = include_str!("./res/olog.md").to_string();
+
+    // Make the OpenAI API call using the included prompt
+    get_openai_response(prompt)
         .map(|response| println!("{}", response))
-        .map_err(|_| println!("Error with OpenAI API"))
+        .map_err(|_| {
+            println!("Error with OpenAI API");
+            io::Error::new(io::ErrorKind::Other, "OpenAI API error")
+        })
         .unwrap_or(());
 }
