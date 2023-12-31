@@ -5,6 +5,10 @@ use std::env;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use pyo3::prelude::*;
+use pyo3::types::{PyModule, PyTuple, PyString};
+use pyo3::conversion::IntoPy;
+use pyo3::conversion::ToPyObject;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -57,6 +61,23 @@ struct Olog {
     nodes: Vec<Node>,
     hyperedges: Vec<Hyperedge>,
 }
+
+fn extract_text_from_pdf(pdf_path: &str, checkpoint_path: &str) -> PyResult<String> {
+    Python::with_gil(|py| {
+        let nougat_ocr = PyModule::import(py, "nougat_ocr")?;
+
+        // Convert Rust strings to Python objects directly
+        let pdf_path_py = pdf_path.to_object(py);
+        let checkpoint_path_py = checkpoint_path.to_object(py);
+
+        // Create a Python tuple with explicit Python objects
+        let args = PyTuple::new(py, &[pdf_path_py, checkpoint_path_py]);
+        let text = nougat_ocr.call_method1("extract_text_from_pdf_file", args)?;
+        text.extract()
+    })
+}
+
+
 
 fn validate_olog_schema(json_data: &str) -> Result<(), serde_json::Error> {
     let _olog: JsonOlogSchema = serde_json::from_str(json_data)?;
@@ -204,10 +225,16 @@ fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
 }
 
 fn main() {
+    let pdf_path = "/Users/luc/AI/olog/src/res/olog.pdf";
+    let checkpoint_path = "/Users/luc/AI/olog/res/nougat/";
     let text = include_str!("./res/olog-pdf.md").to_string();
-    match generate_olog(text) {
-        Ok(olog_schema) => println!("{:#?}", olog_schema),
-        Err(e) => println!("An error occurred: {}", e),
+    //match generate_olog(text) {
+    //    Ok(olog_schema) => println!("{:#?}", olog_schema),
+    //    Err(e) => println!("An error occurred: {}", e),
+    //}
+    match extract_text_from_pdf(pdf_path, checkpoint_path) {
+        Ok(text) => println!("Extracted Text: {}", text),
+        Err(e) => println!("Error: {}", e),
     }
 }
 
