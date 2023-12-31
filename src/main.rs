@@ -5,6 +5,7 @@ use std::io;
 use std::env;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -109,13 +110,42 @@ fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
 
+
+fn replace_ids_with_uuids(mut olog: JsonOlogSchema) -> JsonOlogSchema {
+    let mut id_map: HashMap<String, Uuid> = HashMap::new();
+
+    // Replace node ids
+    for node in olog.nodes.iter_mut() {
+        let uuid = *id_map.entry(node.id.clone()).or_insert_with(Uuid::new_v4);
+        node.id = uuid.to_string();
+    }
+
+    // Replace hyperedge ids and update sources and targets
+    for hyperedge in olog.hyperedges.iter_mut() {
+        let uuid = *id_map.entry(hyperedge.id.clone()).or_insert_with(Uuid::new_v4);
+        hyperedge.id = uuid.to_string();
+
+        for source_id in hyperedge.sources.iter_mut() {
+            let source_uuid = *id_map.entry(source_id.clone()).or_insert_with(Uuid::new_v4);
+            *source_id = source_uuid.to_string();
+        }
+
+        for target_id in hyperedge.targets.iter_mut() {
+            let target_uuid = *id_map.entry(target_id.clone()).or_insert_with(Uuid::new_v4);
+            *target_id = target_uuid.to_string();
+        }
+    }
+
+    olog
+}
+
 fn generate_olog(text: String) -> Result<JsonOlogSchema, Box<dyn std::error::Error>> {
     let prompt = include_str!("./res/olog.md").to_string();
 
     let openai_response = get_openai_response_json(format!("{}\n{}", prompt, text))?;
     let olog_schema: JsonOlogSchema = serde_json::from_str(&openai_response)?;
 
-    Ok(olog_schema)
+    Ok(replace_ids_with_uuids(olog_schema))
 }
 
 fn main() {
