@@ -4,6 +4,28 @@ use openai_api_rs::v1::common::GPT4;
 use std::io;
 use std::env;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonOlogSchema {
+    title: String,
+    nodes: Vec<JsonNodeSchema>,
+    hyperedges: Vec<JsonHyperedgeSchema>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonNodeSchema {
+    id: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonHyperedgeSchema {
+    id: String,
+    label: String,
+    sources: Vec<String>,
+    targets: Vec<String>,
+}
 
 #[derive(Debug)]
 struct Citation {
@@ -26,6 +48,19 @@ struct Hyperedge {
 struct Node {
     id: Uuid,
     label: String,
+}
+
+#[derive(Debug)]
+struct Olog {
+    id: Uuid,
+    title: String,
+    nodes: Vec<Node>,
+    hyperedges: Vec<Hyperedge>,
+}
+
+fn validate_olog_schema(json_data: &str) -> Result<(), serde_json::Error> {
+    let _olog: JsonOlogSchema = serde_json::from_str(json_data)?;
+    Ok(())
 }
 
 fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Error>> {
@@ -74,16 +109,21 @@ fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
 
-fn main() {
+fn generate_olog(text: String) -> Result<JsonOlogSchema, Box<dyn std::error::Error>> {
     let prompt = include_str!("./res/olog.md").to_string();
+
+    let openai_response = get_openai_response_json(format!("{}\n{}", prompt, text))?;
+    let olog_schema: JsonOlogSchema = serde_json::from_str(&openai_response)?;
+
+    Ok(olog_schema)
+}
+
+fn main() {
     let text = include_str!("./res/olog-pdf.md").to_string();
     
-    // Make the OpenAI API call using the included prompt
-    get_openai_response_json(format!("{}\n{}", prompt, text))
-        .map(|response| println!("{}", response))
-        .map_err(|e| {
-            println!("Error with OpenAI API {}", e);
-            io::Error::new(io::ErrorKind::Other, "OpenAI API error")
-        })
-        .unwrap_or(());
+    match generate_olog(text) {
+        Ok(olog_schema) => println!("{:#?}", olog_schema),
+        Err(e) => println!("An error occurred: {}", e),
+    }
 }
+
