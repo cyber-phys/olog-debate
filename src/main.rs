@@ -1,10 +1,10 @@
 use openai_api_rs::v1::api::Client;
 use openai_api_rs::v1::chat_completion::{self, ChatCompletionRequest};
-use openai_api_rs::v1::common::GPT4;
 use std::env;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rusqlite::{params, Connection, Result};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -56,6 +56,208 @@ struct Olog {
     title: String,
     nodes: Vec<Node>,
     hyperedges: Vec<Hyperedge>,
+}
+
+fn create_olog_tables() -> Result<(), rusqlite::Error> {
+    let conn = Connection::open("olog.db")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Ologs (
+            olog_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Nodes (
+            node_id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            olog_id TEXT NOT NULL,
+            FOREIGN KEY(olog_id) REFERENCES Ologs(olog_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Hyperedges (
+            hyperedge_id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            olog_id TEXT NOT NULL,
+            FOREIGN KEY(olog_id) REFERENCES Ologs(olog_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Citations (
+            citation_id TEXT PRIMARY KEY,
+            title TEXT,
+            label TEXT,
+            text TEXT
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Hyperedge_Links (
+            hyperedge_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            FOREIGN KEY(hyperedge_id) REFERENCES Hyperedges(hyperedge_id),
+            FOREIGN KEY(node_id) REFERENCES Nodes(node_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS Citation_Links (
+            hyperedge_id TEXT NOT NULL,
+            citation_id TEXT NOT NULL,
+            FOREIGN KEY(hyperedge_id) REFERENCES Hyperedges(hyperedge_id),
+            FOREIGN KEY(citation_id) REFERENCES Citations(citation_id)
+        )",
+        [],
+    )?;
+
+    Ok(())
+}
+
+
+fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
+    let conn = Connection::open("olog.db")?;
+
+    let mut stmt = conn.prepare("SELECT title FROM Ologs WHERE olog_id = ?1")?;
+    let olog_title: String = stmt.query_row(params![olog_id.to_string()], |row| row.get(0))?;
+
+    let mut stmt = conn.prepare("SELECT node_id, label FROM Nodes WHERE olog_id = ?1")?;
+    let nodes_iter = stmt.query_map(params![olog_id.to_string()], |row| {
+        let id_str: String = row.get(0)?;
+        let id = Uuid::parse_str(&id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(Node { id, label: row.get(1)? })
+    })?;
+
+    let nodes: Vec<Node> = nodes_iter
+        .into_iter()
+        .filter_map(|result| result.ok())  // Handle each row's result
+        .collect();
+
+    let mut stmt = conn.prepare("SELECT hyperedge_id, label FROM Hyperedges WHERE olog_id = ?1")?;
+    let hyperedges_iter = stmt.query_map(params![olog_id.to_string()], |row| {
+        let hyperedge_id_str: String = row.get(0)?;
+        let hyperedge_id = Uuid::parse_str(&hyperedge_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+        let mut stmt = conn.prepare("
+            SELECT c.citation_id, c.title, c.label, c.text
+            FROM Citations AS c
+            JOIN Citation_Links AS cl ON c.citation_id = cl.citation_id
+            WHERE cl.hyperedge_id = ?1
+        ")?;
+        let citations_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
+            let citation_id_str: String = row.get(0)?;
+            let citation_id = Uuid::parse_str(&citation_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    
+            Ok(Citation {
+                id: citation_id,
+                title: row.get(1)?,
+                label: row.get(2)?,
+                text: row.get(3)?,
+            })
+        })?;
+
+        let citations: Vec<Citation> = citations_iter
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = conn.prepare("SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'source'")?;
+        let sources_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
+            let node_id_str: String = row.get(0)?;
+            let node_id = Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            nodes.iter().find(|&n| n.id == node_id).cloned().ok_or(rusqlite::Error::QueryReturnedNoRows)
+        })?;
+
+        let sources: Vec<Node> = sources_iter
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = conn.prepare("SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'target'")?;
+        let targets_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
+            let node_id_str: String = row.get(0)?;
+            let node_id = Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            nodes.iter().find(|&n| n.id == node_id).cloned().ok_or(rusqlite::Error::QueryReturnedNoRows)
+        })?;
+
+        let targets: Vec<Node> = targets_iter
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Hyperedge {
+            id: hyperedge_id,
+            label: row.get(1)?,
+            source: sources,
+            target: targets,
+            citations,
+        })
+    })?;
+
+    let hyperedges: Vec<Hyperedge> = hyperedges_iter
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Olog { id: olog_id, title: olog_title, nodes, hyperedges })
+}
+
+fn write_olog_to_db(olog: &Olog) -> Result<()> {
+    let conn = Connection::open("olog.db")?;
+
+    conn.execute("BEGIN TRANSACTION", [])?;
+
+    conn.execute(
+        "INSERT INTO Ologs (olog_id, title) VALUES (?1, ?2)",
+        params![olog.id.to_string(), olog.title],
+    )?;
+
+    for node in &olog.nodes {
+        conn.execute(
+            "INSERT INTO Nodes (node_id, label, olog_id) VALUES (?1, ?2, ?3)",
+            params![node.id.to_string(), node.label, olog.id.to_string()],
+        )?;
+    }
+
+    for hyperedge in &olog.hyperedges {
+        conn.execute(
+            "INSERT INTO Hyperedges (hyperedge_id, label, olog_id) VALUES (?1, ?2, ?3)",
+            params![hyperedge.id.to_string(), hyperedge.label, olog.id.to_string()],
+        )?;
+
+        for citation in &hyperedge.citations {
+            conn.execute(
+                "INSERT OR IGNORE INTO Citations (citation_id, title, label, text) VALUES (?1, ?2, ?3, ?4)",
+                params![citation.id.to_string(), citation.title, citation.label, citation.text],
+            )?;
+            conn.execute(
+                "INSERT INTO Citation_Links (hyperedge_id, citation_id) VALUES (?1, ?2)",
+                params![hyperedge.id.to_string(), citation.id.to_string()]
+            )?;
+        }
+
+        for source in &hyperedge.source {
+            conn.execute(
+                "INSERT INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'source')",
+                params![hyperedge.id.to_string(), source.id.to_string()],
+            )?;
+        }
+
+        for target in &hyperedge.target {
+            conn.execute(
+                "INSERT INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'target')",
+                params![hyperedge.id.to_string(), target.id.to_string()],
+            )?;
+        }
+    }
+
+    conn.execute("COMMIT", [])?;
+    Ok(())
 }
 
 fn validate_olog_schema(json_data: &str) -> Result<(), serde_json::Error> {
@@ -204,10 +406,27 @@ fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
 }
 
 fn main() {
+    // Assume you have a text string to generate an Olog
     let text = include_str!("./res/olog-pdf.md").to_string();
+    if let Err(e) = create_olog_tables() {
+        eprintln!("Error creating tables: {}", e);
+        return;
+    }
     match generate_olog(text) {
-        Ok(olog_schema) => println!("{:#?}", olog_schema),
-        Err(e) => println!("An error occurred: {}", e),
+        Ok(olog) => {
+            // Write Olog to database
+            match write_olog_to_db(&olog) {
+                Ok(_) => println!("Olog written to database successfully."),
+                Err(e) => println!("Error writing Olog to database: {}", e),
+            }
+
+            // Read Olog from database
+            match read_olog_from_db(olog.id) {
+                Ok(olog_from_db) => println!("Read Olog from database: {:#?}", olog_from_db),
+                Err(e) => println!("Error reading Olog from database: {}", e),
+            }
+        },
+        Err(e) => println!("An error occurred in generating Olog: {}", e),
     }
 }
 
