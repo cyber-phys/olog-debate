@@ -1,7 +1,6 @@
 use openai_api_rs::v1::api::Client;
 use openai_api_rs::v1::chat_completion::{self, ChatCompletionRequest};
 use openai_api_rs::v1::common::GPT4;
-use std::io;
 use std::env;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
@@ -28,7 +27,7 @@ struct JsonHyperedgeSchema {
     targets: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Citation {
     id: Uuid,
     title: String,
@@ -45,7 +44,7 @@ struct Hyperedge {
     citations: Vec<Citation>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node {
     id: Uuid,
     label: String,
@@ -68,7 +67,7 @@ fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Err
     let client = Client::new(env::var("OPENAI_API_KEY")?);
 
     let req = ChatCompletionRequest::new(
-        GPT4.to_string(),
+        "gpt-4-1106-preview".to_string(),
         vec![chat_completion::ChatCompletionMessage {
             role: chat_completion::MessageRole::user,
             content: prompt,
@@ -139,18 +138,73 @@ fn replace_ids_with_uuids(mut olog: JsonOlogSchema) -> JsonOlogSchema {
     olog
 }
 
-fn generate_olog(text: String) -> Result<JsonOlogSchema, Box<dyn std::error::Error>> {
+fn convert_json_olog_to_olog(json_olog: JsonOlogSchema, citation: Citation) -> Olog {
+    let mut id_map: HashMap<String, Uuid> = HashMap::new();
+    let mut node_map: HashMap<Uuid, Node> = HashMap::new();
+
+    // Process nodes and build a map from string IDs to Node instances
+    for json_node in &json_olog.nodes {
+        let uuid = *id_map.entry(json_node.id.clone()).or_insert_with(Uuid::new_v4);
+        let node = Node { id: uuid, label: json_node.label.clone() };
+        node_map.insert(uuid, node);
+    }
+
+    // Convert nodes to Vec<Node>
+    let nodes: Vec<Node> = node_map.values().cloned().collect();
+
+    // Process hyperedges and convert sources and targets to Node instances
+    let hyperedges = json_olog.hyperedges.into_iter().map(|json_hyperedge| {
+        let hyperedge_id = *id_map.entry(json_hyperedge.id.clone()).or_insert_with(Uuid::new_v4);
+        let sources = json_hyperedge.sources.iter()
+            .filter_map(|source_id| {
+                id_map.get(source_id)
+                    .and_then(|&uuid| node_map.get(&uuid).cloned())
+            })
+            .collect();
+        let targets = json_hyperedge.targets.iter()
+            .filter_map(|target_id| {
+                id_map.get(target_id)
+                    .and_then(|&uuid| node_map.get(&uuid).cloned())
+            })
+            .collect();
+
+        Hyperedge {
+            id: hyperedge_id,
+            label: json_hyperedge.label,
+            source: sources,
+            target: targets,
+            citations: vec![citation.clone()],
+        }
+    }).collect();
+
+    Olog {
+        id: Uuid::new_v4(),
+        title: json_olog.title,
+        nodes,
+        hyperedges,
+    }
+}
+
+fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
     let prompt = include_str!("./res/olog.md").to_string();
-
     let openai_response = get_openai_response_json(format!("{}\n{}", prompt, text))?;
+    let openai_title = get_openai_response(format!("{}\n{}", "What is the the title of this document? Respond with only the title and no additional text", text))?;
+    let openai_label = get_openai_response(format!("{}\n{}", "Create a label for this document. The label should be under 50 words long. Respond with only the label and no additional text", text))?;
     let olog_schema: JsonOlogSchema = serde_json::from_str(&openai_response)?;
+    let olog_schema_uuid: JsonOlogSchema = replace_ids_with_uuids(olog_schema);
+    let citation: Citation = Citation {
+        id: Uuid::new_v4(),
+        title: openai_title,
+        label: openai_label,
+        text: text,
+    };
+    let olog: Olog = convert_json_olog_to_olog(olog_schema_uuid, citation);
 
-    Ok(replace_ids_with_uuids(olog_schema))
+    Ok(olog)
 }
 
 fn main() {
     let text = include_str!("./res/olog-pdf.md").to_string();
-    
     match generate_olog(text) {
         Ok(olog_schema) => println!("{:#?}", olog_schema),
         Err(e) => println!("An error occurred: {}", e),
