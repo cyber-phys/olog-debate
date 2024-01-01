@@ -35,7 +35,7 @@ struct Citation {
     text: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Hyperedge {
     id: Uuid,
     label: String,
@@ -44,7 +44,7 @@ struct Hyperedge {
     citations: Vec<Citation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct Node {
     id: Uuid,
     label: String,
@@ -122,7 +122,6 @@ fn create_olog_tables() -> Result<(), rusqlite::Error> {
 
     Ok(())
 }
-
 
 fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
     let conn = Connection::open("olog.db")?;
@@ -286,7 +285,6 @@ fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Err
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
 
-
 fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error::Error>> {
     let client = Client::new(env::var("OPENAI_API_KEY")?);
 
@@ -310,7 +308,6 @@ fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error
         .and_then(|choice| choice.message.content.clone())
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
-
 
 fn replace_ids_with_uuids(mut olog: JsonOlogSchema) -> JsonOlogSchema {
     let mut id_map: HashMap<String, Uuid> = HashMap::new();
@@ -387,6 +384,46 @@ fn convert_json_olog_to_olog(json_olog: JsonOlogSchema, citation: Citation) -> O
     }
 }
 
+fn merge_ologs(olog1: Olog, olog2: Olog) -> Olog {
+    let mut node_map = HashMap::new();
+    let mut hyperedge_map = HashMap::new();
+
+    // Merge nodes
+    for node in olog1.nodes.into_iter().chain(olog2.nodes.into_iter()) {
+        node_map.entry(node.label.clone()).or_insert(node);
+    }
+
+    // Preparing merged nodes for hyperedge linking
+    let merged_nodes = node_map.values().cloned().collect::<Vec<Node>>();
+
+    // Helper to find node by label
+    let find_node_by_label = |label: &str| merged_nodes.iter().find(|n| n.label == label).cloned();
+
+    // Merge hyperedges
+    for hyperedge in olog1.hyperedges.into_iter().chain(olog2.hyperedges.into_iter()) {
+        let source_nodes = hyperedge.source.iter().filter_map(|node| find_node_by_label(&node.label)).collect::<Vec<Node>>();
+        let target_nodes = hyperedge.target.iter().filter_map(|node| find_node_by_label(&node.label)).collect::<Vec<Node>>();
+
+        // Key for identifying unique hyperedges
+        let hyperedge_key = (hyperedge.label.clone(), source_nodes.clone(), target_nodes.clone());
+        
+        hyperedge_map.entry(hyperedge_key).or_insert(Hyperedge {
+            id: Uuid::new_v4(), // Assign a new UUID for merged hyperedge
+            label: hyperedge.label,
+            source: source_nodes,
+            target: target_nodes,
+            citations: hyperedge.citations,
+        });
+    }
+
+    Olog {
+        id: olog1.id,
+        title: olog1.title,
+        nodes: merged_nodes,
+        hyperedges: hyperedge_map.values().cloned().collect(),
+    }
+}
+
 fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
     let prompt = include_str!("./res/olog.md").to_string();
     let openai_response = get_openai_response_json(format!("{}\n{}", prompt, text))?;
@@ -406,27 +443,43 @@ fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    // Assume you have a text string to generate an Olog
     let text = include_str!("./res/olog-pdf.md").to_string();
+
+    // Create database tables
     if let Err(e) = create_olog_tables() {
         eprintln!("Error creating tables: {}", e);
         return;
     }
-    match generate_olog(text) {
-        Ok(olog) => {
-            // Write Olog to database
-            match write_olog_to_db(&olog) {
-                Ok(_) => println!("Olog written to database successfully."),
-                Err(e) => println!("Error writing Olog to database: {}", e),
-            }
 
-            // Read Olog from database
-            match read_olog_from_db(olog.id) {
-                Ok(olog_from_db) => println!("Read Olog from database: {:#?}", olog_from_db),
-                Err(e) => println!("Error reading Olog from database: {}", e),
-            }
+    // Generate two separate Ologs
+    let olog1 = match generate_olog(text.clone()) {
+        Ok(olog) => olog,
+        Err(e) => {
+            eprintln!("An error occurred in generating Olog1: {}", e);
+            return;
         },
-        Err(e) => println!("An error occurred in generating Olog: {}", e),
+    };
+
+    let olog2 = match generate_olog(text) {
+        Ok(olog) => olog,
+        Err(e) => {
+            eprintln!("An error occurred in generating Olog2: {}", e);
+            return;
+        },
+    };
+
+    // Merge the two Ologs
+    let merged_olog = merge_ologs(olog1, olog2);
+
+    // Write the merged Olog to the database
+    match write_olog_to_db(&merged_olog) {
+        Ok(_) => println!("Merged Olog written to database successfully."),
+        Err(e) => eprintln!("Error writing merged Olog to database: {}", e),
+    }
+
+    // Optionally, read the merged Olog from the database and display it
+    match read_olog_from_db(merged_olog.id) {
+        Ok(olog_from_db) => println!("Read merged Olog from database: {:#?}", olog_from_db),
+        Err(e) => eprintln!("Error reading merged Olog from database: {}", e),
     }
 }
-
