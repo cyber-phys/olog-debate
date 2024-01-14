@@ -5,6 +5,7 @@ use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use rusqlite::{params, Connection, Result};
+use clap::{App, Arg, SubCommand};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -259,6 +260,15 @@ fn write_olog_to_db(olog: &Olog) -> Result<()> {
     Ok(())
 }
 
+fn delete_olog_from_db(olog_id: Uuid) -> Result<(), rusqlite::Error> {
+    let conn = Connection::open("olog.db")?;
+
+    // Example DELETE query, adjust according to your schema
+    conn.execute("DELETE FROM Ologs WHERE olog_id = ?", params![olog_id.to_string()])?;
+
+    Ok(())
+}
+
 fn validate_olog_schema(json_data: &str) -> Result<(), serde_json::Error> {
     let _olog: JsonOlogSchema = serde_json::from_str(json_data)?;
     Ok(())
@@ -443,43 +453,106 @@ fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    let text = include_str!("./res/olog-pdf.md").to_string();
+    let matches = App::new("Olog Management System")
+        .version("1.0")
+        .author("Your Name")
+        .about("Manages Ologs")
+        .subcommand(
+            SubCommand::with_name("generate-olog")
+                .about("Generates an Olog from a given markdown file")
+                .arg(Arg::with_name("FILE")
+                    .help("The path to the markdown file")
+                    .required(true)
+                    .takes_value(true)),
+        )
+        .subcommand(
+            SubCommand::with_name("merge-ologs")
+            .about("Merges two Ologs and updates the database")
+            .arg(Arg::with_name("ID1").help("The ID of the first Olog to merge").required(true))
+            .arg(Arg::with_name("ID2").help("The ID of the second Olog to merge").required(true)),
+        )
+        .subcommand(
+            SubCommand::with_name("read-db")
+                .about("Reads an Olog from the database")
+                .arg(Arg::with_name("ID").help("The ID of the Olog to read").required(true)),
+        )
+        .get_matches();
 
-    // Create database tables
-    if let Err(e) = create_olog_tables() {
-        eprintln!("Error creating tables: {}", e);
-        return;
-    }
+    match matches.subcommand() {
+        Some(("generate-olog", sub_m)) => {
+            let file_path = sub_m.value_of("FILE").unwrap();
+            let text = match std::fs::read_to_string(file_path) {
+                Ok(content) => content,
+                Err(e) => {
+                    eprintln!("Failed to read file '{}': {}", file_path, e);
+                    return;
+                },
+            };
 
-    // Generate two separate Ologs
-    let olog1 = match generate_olog(text.clone()) {
-        Ok(olog) => olog,
-        Err(e) => {
-            eprintln!("An error occurred in generating Olog1: {}", e);
-            return;
+            let olog = match generate_olog(text) {
+                Ok(olog) => olog,
+                Err(e) => {
+                    eprintln!("An error occurred in generating Olog: {}", e);
+                    return;
+                },
+            };
+
+            match write_olog_to_db(&olog) {
+                Ok(_) => println!("Olog written to database successfully. UUID: {:?}", olog.id),
+                Err(e) => eprintln!("Error writing Olog to database: {}", e),
+            }
         },
-    };
+        Some(("merge-ologs", sub_m)) => {
+            let id1_str = sub_m.value_of("ID1").unwrap();
+            let id2_str = sub_m.value_of("ID2").unwrap();
 
-    let olog2 = match generate_olog(text) {
-        Ok(olog) => olog,
-        Err(e) => {
-            eprintln!("An error occurred in generating Olog2: {}", e);
-            return;
+            let olog1_id = match Uuid::parse_str(id1_str) {
+                Ok(uuid) => uuid,
+                Err(_) => { eprintln!("Invalid UUID format for ID1"); return; }
+            };
+
+            let olog2_id = match Uuid::parse_str(id2_str) {
+                Ok(uuid) => uuid,
+                Err(_) => { eprintln!("Invalid UUID format for ID2"); return; }
+            };
+
+            let olog1 = match read_olog_from_db(olog1_id) {
+                Ok(olog) => olog,
+                Err(e) => { eprintln!("Error reading Olog1 from database: {}", e); return; }
+            };
+
+            let olog2 = match read_olog_from_db(olog2_id) {
+                Ok(olog) => olog,
+                Err(e) => { eprintln!("Error reading Olog2 from database: {}", e); return; }
+            };
+
+            let merged_olog = merge_ologs(olog1, olog2);
+
+            if let Err(e) = delete_olog_from_db(olog1_id) {
+                eprintln!("Error deleting Olog1 from database: {}", e);
+                return;
+            }
+
+            if let Err(e) = delete_olog_from_db(olog2_id) {
+                eprintln!("Error deleting Olog2 from database: {}", e);
+                return;
+            }
+
+            match write_olog_to_db(&merged_olog) {
+                Ok(_) => println!("Merged Olog written to database successfully. UUID: {:?}", merged_olog.id),
+                Err(e) => eprintln!("Error writing merged Olog to database: {}", e),
+            }
         },
-    };
-
-    // Merge the two Ologs
-    let merged_olog = merge_ologs(olog1, olog2);
-
-    // Write the merged Olog to the database
-    match write_olog_to_db(&merged_olog) {
-        Ok(_) => println!("Merged Olog written to database successfully."),
-        Err(e) => eprintln!("Error writing merged Olog to database: {}", e),
-    }
-
-    // Optionally, read the merged Olog from the database and display it
-    match read_olog_from_db(merged_olog.id) {
-        Ok(olog_from_db) => println!("Read merged Olog from database: {:#?}", olog_from_db),
-        Err(e) => eprintln!("Error reading merged Olog from database: {}", e),
+        Some(("read-db", sub_m)) => {
+            let id = sub_m.value_of("ID").unwrap().to_string();
+            match Uuid::parse_str(&id) {
+                Ok(uuid) => match read_olog_from_db(uuid) {
+                    Ok(olog) => println!("Olog from DB: {:?}", olog),
+                    Err(e) => eprintln!("Error reading from DB: {}", e),
+                },
+                Err(_) => eprintln!("Invalid UUID format"),
+            }
+        },
+        _ => eprintln!("Invalid command"),
     }
 }
