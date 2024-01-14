@@ -559,6 +559,48 @@ async fn process_paper_and_generate_olog(paper_url: &str) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn convert_olog_to_json(olog: &Olog) -> JsonOlogSchema {
+    // Convert Nodes
+    let json_nodes: Vec<JsonNodeSchema> = olog.nodes.iter().map(|node| {
+        JsonNodeSchema {
+            id: node.id.to_string(), // Assuming each node has a unique identifier
+            label: node.label.clone(),
+        }
+    }).collect();
+
+    // Convert Hyperedges
+    let json_hyperedges: Vec<JsonHyperedgeSchema> = olog.hyperedges.iter().map(|hyperedge| {
+        JsonHyperedgeSchema {
+            id: hyperedge.id.to_string(), // Assuming each hyperedge has a unique identifier
+            label: hyperedge.label.clone(),
+            sources: hyperedge.source.iter().map(|node| node.id.to_string()).collect(),
+            targets: hyperedge.target.iter().map(|node| node.id.to_string()).collect(),
+        }
+    }).collect();
+
+    // Construct the final JsonOlogSchema
+    JsonOlogSchema {
+        title: olog.title.clone(),  // Assuming the title is a direct copy
+        nodes: json_nodes,
+        hyperedges: json_hyperedges,
+    }
+}
+
+fn fetch_and_format_olog_hypergraph(uuid_str: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let uuid = Uuid::parse_str(uuid_str)?;
+
+    // Fetch the Olog from the database
+    let olog = read_olog_from_db(uuid)?;
+
+    // Convert the Olog to the JSON structure
+    let json_olog = convert_olog_to_json(&olog);
+
+    // Serialize to JSON string
+    let json_str = serde_json::to_string(&json_olog)?;
+
+    Ok(json_str)
+}
+
 fn main() {
     let matches = App::new("Olog Management System")
         .version("1.0")
@@ -588,6 +630,14 @@ fn main() {
                 .about("Processes a paper from a given URL and adds an Olog to the database")
                 .arg(Arg::with_name("URL")
                     .help("The URL of the paper to process")
+                    .required(true)
+                    .takes_value(true)),
+        )
+        .subcommand(
+            SubCommand::with_name("olog-json")
+                .about("Fetches an Olog from the database and outputs its json hypergraph")
+                .arg(Arg::with_name("UUID")
+                    .help("The UUID of the Olog to fetch")
                     .required(true)
                     .takes_value(true)),
         )
@@ -677,6 +727,14 @@ fn main() {
                     eprintln!("Error processing paper: {}", e);
                 }
             });
+        },
+        Some(("olog-json", sub_m)) => {
+            let uuid = sub_m.value_of("UUID").unwrap();
+    
+            match fetch_and_format_olog_hypergraph(uuid) {
+                Ok(json_str) => println!("{}", json_str),
+                Err(e) => eprintln!("Error fetching Olog: {}", e),
+            }
         },
         _ => eprintln!("Invalid command"),
     }
