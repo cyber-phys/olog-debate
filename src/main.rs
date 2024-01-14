@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use rusqlite::{params, Connection, Result};
 use clap::{App, Arg, SubCommand};
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -58,6 +59,36 @@ struct Olog {
     nodes: Vec<Node>,
     hyperedges: Vec<Hyperedge>,
 }
+
+#[derive(Serialize)]
+struct OcrPdfPostRequest {
+    version: String,
+    input: OcrInput,
+}
+
+#[derive(Serialize)]
+struct OcrInput {
+    document: String,
+    postprocess: bool,
+    early_stopping: bool,
+}
+
+#[derive(Deserialize)]
+struct OcrPdfPostResponse {
+    urls: OcrUrls,
+}
+
+#[derive(Deserialize)]
+struct OcrUrls {
+    get: String,
+}
+
+#[derive(Deserialize)]
+struct OcrPdfGetResponse {
+    status: String,
+    output: Option<String>, // Assuming the output is a string; adjust as needed
+}
+
 
 fn create_olog_tables() -> Result<(), rusqlite::Error> {
     let conn = Connection::open("olog.db")?;
@@ -452,6 +483,82 @@ fn generate_olog(text: String) -> Result<Olog, Box<dyn std::error::Error>> {
     Ok(olog)
 }
 
+async fn ocr_pdf_post(pdf_url: &str, replicate_api_key: &str) -> Result<String, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let req_body = OcrPdfPostRequest {
+        version: "fbf959aabb306f7cc83e31da4a5ee0ee78406d11216295dbd9ef75aba9b30538".to_string(),
+        input: OcrInput {
+            document: pdf_url.to_string(),
+            postprocess: false,
+            early_stopping: false,
+        },
+    };
+
+    let response = client.post("https://api.replicate.com/v1/deployments/chartierluc/nougat/predictions")
+        .header("Authorization", format!("Token {}", replicate_api_key))
+        .json(&req_body)
+        .send()
+        .await?;
+
+    let response_body: OcrPdfPostResponse = response.json().await?;
+    Ok(response_body.urls.get)
+}
+
+async fn ocr_pdf_get(prediction_url: &str, replicate_api_key: &str) -> Result<OcrPdfGetResponse, reqwest::Error> {
+    let client = reqwest::Client::new();
+
+    let response = client.get(prediction_url)
+        .header("Authorization", format!("Token {}", replicate_api_key))
+        .send()
+        .await?;
+
+    let response_body: OcrPdfGetResponse = response.json().await?;
+    Ok(response_body)
+}
+
+async fn ocr_pdf_poll(prediction_url: String, replicate_api_key: String) -> Result<String, Box<dyn std::error::Error>> {
+    let timeout_duration = Duration::from_secs(240); // 4 minutes
+
+    timeout(timeout_duration, async {
+        loop {
+            let response = ocr_pdf_get(&prediction_url, &replicate_api_key).await?;
+
+            match response.status.as_str() {
+                "succeeded" => return Ok(response.output.ok_or("No output found")?),
+                "error" => return Err("Error in processing".into()),
+                _ => tokio::time::sleep(tokio::time::Duration::from_secs(1)).await,
+            }
+        }
+    }).await?
+}
+
+async fn fetch_text_from_url(url: &str) -> Result<String, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let response = client.get(url).send().await?;
+
+    response.text().await
+}
+
+async fn process_paper_and_generate_olog(paper_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Fetch the API key from the environment variable
+    let replicate_api_key = env::var("REPLICATE_API_TOKEN")
+        .map_err(|_| "REPLICATE_API_TOKEN environment variable not set")?;
+
+    let prediction_url = ocr_pdf_post(paper_url, &replicate_api_key).await?;
+    let ocr_result_url = ocr_pdf_poll(prediction_url, replicate_api_key).await?;
+    let ocr_result = fetch_text_from_url(&ocr_result_url).await?;
+
+    // Generate an Olog from the OCR result (Assuming generate_olog exists)
+    let olog = generate_olog(ocr_result)?;
+
+    // Write the generated Olog to the database (Assuming write_olog_to_db exists)
+    write_olog_to_db(&olog)?;
+
+    println!("Olog written to database successfully. UUID: {:?}", olog.id);
+
+    Ok(())
+}
+
 fn main() {
     let matches = App::new("Olog Management System")
         .version("1.0")
@@ -475,6 +582,14 @@ fn main() {
             SubCommand::with_name("read-db")
                 .about("Reads an Olog from the database")
                 .arg(Arg::with_name("ID").help("The ID of the Olog to read").required(true)),
+        )
+        .subcommand(
+            SubCommand::with_name("process-paper")
+                .about("Processes a paper from a given URL and adds an Olog to the database")
+                .arg(Arg::with_name("URL")
+                    .help("The URL of the paper to process")
+                    .required(true)
+                    .takes_value(true)),
         )
         .get_matches();
 
@@ -552,6 +667,16 @@ fn main() {
                 },
                 Err(_) => eprintln!("Invalid UUID format"),
             }
+        },
+        Some(("process-paper", sub_m)) => {
+            let paper_url = sub_m.value_of("URL").unwrap();
+        
+            // The following steps are assumed to be asynchronous, so we'll need to use await
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                if let Err(e) = process_paper_and_generate_olog(paper_url).await {
+                    eprintln!("Error processing paper: {}", e);
+                }
+            });
         },
         _ => eprintln!("Invalid command"),
     }
