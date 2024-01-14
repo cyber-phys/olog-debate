@@ -539,22 +539,29 @@ async fn fetch_text_from_url(url: &str) -> Result<String, reqwest::Error> {
     response.text().await
 }
 
-async fn process_paper_and_generate_olog(paper_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Fetch the API key from the environment variable
+async fn process_paper_and_generate_olog(paper_url: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
     let replicate_api_key = env::var("REPLICATE_API_TOKEN")
         .map_err(|_| "REPLICATE_API_TOKEN environment variable not set")?;
 
+    let mut merged_olog: Option<Olog> = None;
     let prediction_url = ocr_pdf_post(paper_url, &replicate_api_key).await?;
-    let ocr_result_url = ocr_pdf_poll(prediction_url, replicate_api_key).await?;
+    let ocr_result_url = ocr_pdf_poll(prediction_url, replicate_api_key.clone()).await?;
     let ocr_result = fetch_text_from_url(&ocr_result_url).await?;
 
-    // Generate an Olog from the OCR result (Assuming generate_olog exists)
-    let olog = generate_olog(ocr_result)?;
+    for _ in 0..count {
+        let new_olog = generate_olog(ocr_result.clone())?;
 
-    // Write the generated Olog to the database (Assuming write_olog_to_db exists)
-    write_olog_to_db(&olog)?;
+        merged_olog = if let Some(existing_olog) = merged_olog {
+            Some(merge_ologs(existing_olog, new_olog))
+        } else {
+            Some(new_olog)
+        };
+    }
 
-    println!("Olog written to database successfully. UUID: {:?}", olog.id);
+    if let Some(final_olog) = merged_olog {
+        write_olog_to_db(&final_olog)?;
+        println!("Merged Olog written to database successfully. UUID: {:?}", final_olog.id);
+    }
 
     Ok(())
 }
@@ -631,7 +638,12 @@ fn main() {
                 .arg(Arg::with_name("URL")
                     .help("The URL of the paper to process")
                     .required(true)
-                    .takes_value(true)),
+                    .takes_value(true))
+                .arg(Arg::with_name("COUNT")
+                    .help("Number of times to generate an Olog")
+                    .required(true)
+                    .takes_value(true)
+                    .validator(|v| v.parse::<usize>().map(|_| ()).map_err(|_| "COUNT must be an integer")))
         )
         .subcommand(
             SubCommand::with_name("olog-json")
@@ -720,10 +732,10 @@ fn main() {
         },
         Some(("process-paper", sub_m)) => {
             let paper_url = sub_m.value_of("URL").unwrap();
+            let count = sub_m.value_of("COUNT").unwrap().parse::<usize>().unwrap();
         
-            // The following steps are assumed to be asynchronous, so we'll need to use await
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                if let Err(e) = process_paper_and_generate_olog(paper_url).await {
+                if let Err(e) = process_paper_and_generate_olog(paper_url, count).await {
                     eprintln!("Error processing paper: {}", e);
                 }
             });
