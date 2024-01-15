@@ -333,7 +333,7 @@ fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Err
     let client = Client::new(env::var("OPENAI_API_KEY")?);
 
     let req = ChatCompletionRequest::new(
-        "gpt-4-1106-preview".to_string(),
+        "mistralai/mixtral-8x7b".to_string(),
         vec![chat_completion::ChatCompletionMessage {
             role: chat_completion::MessageRole::user,
             content: prompt,
@@ -358,7 +358,7 @@ fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error
     let response_format_value = serde_json::json!({ "type": "json_object" });
 
     let req = ChatCompletionRequest::new(
-        "gpt-4-1106-preview".to_string(),
+        "mistralai/mixtral-8x7b".to_string(),
         vec![chat_completion::ChatCompletionMessage {
             role: chat_completion::MessageRole::user,
             content: prompt,
