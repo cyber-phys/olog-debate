@@ -154,6 +154,23 @@ fn create_olog_tables() -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn convert_olog_to_rdf(olog: &Olog) -> String {
+    let mut rdf_triples = String::new();
+
+    for hyperedge in &olog.hyperedges {
+        for source in &hyperedge.source {
+            for target in &hyperedge.target {
+                rdf_triples.push_str(&format!(
+                    "<{}> <{}> <{}>\n",
+                    source.id, hyperedge.label, target.id
+                ));
+            }
+        }
+    }
+
+    rdf_triples
+}
+
 fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
     let conn = Connection::open("olog.db")?;
 
@@ -771,6 +788,16 @@ fn main() {
                         .takes_value(true),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("create-rdf-triple")
+                .about("Converts an Olog to an RDF triple")
+                .arg(
+                    Arg::with_name("UUID")
+                        .help("The UUID of the Olog to convert")
+                        .required(true)
+                        .takes_value(true),
+                ),
+        )
         .get_matches();
 
     match matches.subcommand() {
@@ -879,6 +906,19 @@ fn main() {
             match fetch_and_format_olog_hypergraph(uuid) {
                 Ok(json_str) => println!("{}", json_str),
                 Err(e) => eprintln!("Error fetching Olog: {}", e),
+            }
+        }
+        Some(("create-rdf-triple", sub_m)) => {
+            let uuid_str = sub_m.value_of("UUID").unwrap();
+            match Uuid::parse_str(uuid_str) {
+                Ok(uuid) => match read_olog_from_db(uuid) {
+                    Ok(olog) => {
+                        let rdf_triple = convert_olog_to_rdf(&olog);
+                        println!("{}", rdf_triple);
+                    }
+                    Err(e) => eprintln!("Error reading from DB: {}", e),
+                },
+                Err(_) => eprintln!("Invalid UUID format"),
             }
         }
         _ => eprintln!("Invalid command"),
