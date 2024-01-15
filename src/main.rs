@@ -1,12 +1,12 @@
+use clap::{App, Arg, SubCommand};
 use openai_api_rs::v1::api::Client;
 use openai_api_rs::v1::chat_completion::{self, ChatCompletionRequest};
-use std::env;
-use uuid::Uuid;
+use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rusqlite::{params, Connection, Result};
-use clap::{App, Arg, SubCommand};
+use std::env;
 use tokio::time::{timeout, Duration};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonOlogSchema {
@@ -89,7 +89,6 @@ struct OcrPdfGetResponse {
     output: Option<String>, // Assuming the output is a string; adjust as needed
 }
 
-
 fn create_olog_tables() -> Result<(), rusqlite::Error> {
     let conn = Connection::open("olog.db")?;
 
@@ -165,29 +164,36 @@ fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
     let nodes_iter = stmt.query_map(params![olog_id.to_string()], |row| {
         let id_str: String = row.get(0)?;
         let id = Uuid::parse_str(&id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        Ok(Node { id, label: row.get(1)? })
+        Ok(Node {
+            id,
+            label: row.get(1)?,
+        })
     })?;
 
     let nodes: Vec<Node> = nodes_iter
         .into_iter()
-        .filter_map(|result| result.ok())  // Handle each row's result
+        .filter_map(|result| result.ok()) // Handle each row's result
         .collect();
 
     let mut stmt = conn.prepare("SELECT hyperedge_id, label FROM Hyperedges WHERE olog_id = ?1")?;
     let hyperedges_iter = stmt.query_map(params![olog_id.to_string()], |row| {
         let hyperedge_id_str: String = row.get(0)?;
-        let hyperedge_id = Uuid::parse_str(&hyperedge_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let hyperedge_id =
+            Uuid::parse_str(&hyperedge_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
-        let mut stmt = conn.prepare("
+        let mut stmt = conn.prepare(
+            "
             SELECT c.citation_id, c.title, c.label, c.text
             FROM Citations AS c
             JOIN Citation_Links AS cl ON c.citation_id = cl.citation_id
             WHERE cl.hyperedge_id = ?1
-        ")?;
+        ",
+        )?;
         let citations_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
             let citation_id_str: String = row.get(0)?;
-            let citation_id = Uuid::parse_str(&citation_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    
+            let citation_id =
+                Uuid::parse_str(&citation_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+
             Ok(Citation {
                 id: citation_id,
                 title: row.get(1)?,
@@ -196,31 +202,39 @@ fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
             })
         })?;
 
-        let citations: Vec<Citation> = citations_iter
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        let citations: Vec<Citation> = citations_iter.into_iter().collect::<Result<Vec<_>, _>>()?;
 
-        let mut stmt = conn.prepare("SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'source'")?;
+        let mut stmt = conn.prepare(
+            "SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'source'",
+        )?;
         let sources_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
             let node_id_str: String = row.get(0)?;
-            let node_id = Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            nodes.iter().find(|&n| n.id == node_id).cloned().ok_or(rusqlite::Error::QueryReturnedNoRows)
+            let node_id =
+                Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            nodes
+                .iter()
+                .find(|&n| n.id == node_id)
+                .cloned()
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)
         })?;
 
-        let sources: Vec<Node> = sources_iter
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        let sources: Vec<Node> = sources_iter.into_iter().collect::<Result<Vec<_>, _>>()?;
 
-        let mut stmt = conn.prepare("SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'target'")?;
+        let mut stmt = conn.prepare(
+            "SELECT node_id FROM Hyperedge_Links WHERE hyperedge_id = ?1 AND type = 'target'",
+        )?;
         let targets_iter = stmt.query_map(params![hyperedge_id.to_string()], |row| {
             let node_id_str: String = row.get(0)?;
-            let node_id = Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            nodes.iter().find(|&n| n.id == node_id).cloned().ok_or(rusqlite::Error::QueryReturnedNoRows)
+            let node_id =
+                Uuid::parse_str(&node_id_str).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            nodes
+                .iter()
+                .find(|&n| n.id == node_id)
+                .cloned()
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)
         })?;
 
-        let targets: Vec<Node> = targets_iter
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        let targets: Vec<Node> = targets_iter.into_iter().collect::<Result<Vec<_>, _>>()?;
 
         Ok(Hyperedge {
             id: hyperedge_id,
@@ -231,11 +245,14 @@ fn read_olog_from_db(olog_id: Uuid) -> Result<Olog> {
         })
     })?;
 
-    let hyperedges: Vec<Hyperedge> = hyperedges_iter
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let hyperedges: Vec<Hyperedge> = hyperedges_iter.into_iter().collect::<Result<Vec<_>, _>>()?;
 
-    Ok(Olog { id: olog_id, title: olog_title, nodes, hyperedges })
+    Ok(Olog {
+        id: olog_id,
+        title: olog_title,
+        nodes,
+        hyperedges,
+    })
 }
 
 fn write_olog_to_db(olog: &Olog) -> Result<()> {
@@ -244,44 +261,48 @@ fn write_olog_to_db(olog: &Olog) -> Result<()> {
     conn.execute("BEGIN TRANSACTION", [])?;
 
     conn.execute(
-        "INSERT INTO Ologs (olog_id, title) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO Ologs (olog_id, title) VALUES (?1, ?2)",
         params![olog.id.to_string(), olog.title],
     )?;
 
     for node in &olog.nodes {
         conn.execute(
-            "INSERT INTO Nodes (node_id, label, olog_id) VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO Nodes (node_id, label, olog_id) VALUES (?1, ?2, ?3)",
             params![node.id.to_string(), node.label, olog.id.to_string()],
         )?;
     }
 
     for hyperedge in &olog.hyperedges {
         conn.execute(
-            "INSERT INTO Hyperedges (hyperedge_id, label, olog_id) VALUES (?1, ?2, ?3)",
-            params![hyperedge.id.to_string(), hyperedge.label, olog.id.to_string()],
+            "INSERT OR REPLACE INTO Hyperedges (hyperedge_id, label, olog_id) VALUES (?1, ?2, ?3)",
+            params![
+                hyperedge.id.to_string(),
+                hyperedge.label,
+                olog.id.to_string()
+            ],
         )?;
 
         for citation in &hyperedge.citations {
             conn.execute(
-                "INSERT OR IGNORE INTO Citations (citation_id, title, label, text) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO Citations (citation_id, title, label, text) VALUES (?1, ?2, ?3, ?4)",
                 params![citation.id.to_string(), citation.title, citation.label, citation.text],
             )?;
             conn.execute(
-                "INSERT INTO Citation_Links (hyperedge_id, citation_id) VALUES (?1, ?2)",
-                params![hyperedge.id.to_string(), citation.id.to_string()]
+                "INSERT OR REPLACE INTO Citation_Links (hyperedge_id, citation_id) VALUES (?1, ?2)",
+                params![hyperedge.id.to_string(), citation.id.to_string()],
             )?;
         }
 
         for source in &hyperedge.source {
             conn.execute(
-                "INSERT INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'source')",
+                "INSERT OR REPLACE INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'source')",
                 params![hyperedge.id.to_string(), source.id.to_string()],
             )?;
         }
 
         for target in &hyperedge.target {
             conn.execute(
-                "INSERT INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'target')",
+                "INSERT OR REPLACE INTO Hyperedge_Links (hyperedge_id, node_id, type) VALUES (?1, ?2, 'target')",
                 params![hyperedge.id.to_string(), target.id.to_string()],
             )?;
         }
@@ -295,7 +316,10 @@ fn delete_olog_from_db(olog_id: Uuid) -> Result<(), rusqlite::Error> {
     let conn = Connection::open("olog.db")?;
 
     // Example DELETE query, adjust according to your schema
-    conn.execute("DELETE FROM Ologs WHERE olog_id = ?", params![olog_id.to_string()])?;
+    conn.execute(
+        "DELETE FROM Ologs WHERE olog_id = ?",
+        params![olog_id.to_string()],
+    )?;
 
     Ok(())
 }
@@ -321,7 +345,9 @@ fn get_openai_response(prompt: String) -> Result<String, Box<dyn std::error::Err
     let result = client.chat_completion(req)?;
 
     // Handling the Option<String> with ok_or
-    result.choices.get(0)
+    result
+        .choices
+        .get(0)
         .and_then(|choice| choice.message.content.clone())
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
@@ -345,7 +371,9 @@ fn get_openai_response_json(prompt: String) -> Result<String, Box<dyn std::error
     let result = client.chat_completion(req)?;
 
     // Handling the Option<String> with ok_or
-    result.choices.get(0)
+    result
+        .choices
+        .get(0)
         .and_then(|choice| choice.message.content.clone())
         .ok_or_else(|| "No response from OpenAI".into()) // Converting to Result
 }
@@ -361,7 +389,9 @@ fn replace_ids_with_uuids(mut olog: JsonOlogSchema) -> JsonOlogSchema {
 
     // Replace hyperedge ids and update sources and targets
     for hyperedge in olog.hyperedges.iter_mut() {
-        let uuid = *id_map.entry(hyperedge.id.clone()).or_insert_with(Uuid::new_v4);
+        let uuid = *id_map
+            .entry(hyperedge.id.clone())
+            .or_insert_with(Uuid::new_v4);
         hyperedge.id = uuid.to_string();
 
         for source_id in hyperedge.sources.iter_mut() {
@@ -384,8 +414,13 @@ fn convert_json_olog_to_olog(json_olog: JsonOlogSchema, citation: Citation) -> O
 
     // Process nodes and build a map from string IDs to Node instances
     for json_node in &json_olog.nodes {
-        let uuid = *id_map.entry(json_node.id.clone()).or_insert_with(Uuid::new_v4);
-        let node = Node { id: uuid, label: json_node.label.clone() };
+        let uuid = *id_map
+            .entry(json_node.id.clone())
+            .or_insert_with(Uuid::new_v4);
+        let node = Node {
+            id: uuid,
+            label: json_node.label.clone(),
+        };
         node_map.insert(uuid, node);
     }
 
@@ -393,29 +428,41 @@ fn convert_json_olog_to_olog(json_olog: JsonOlogSchema, citation: Citation) -> O
     let nodes: Vec<Node> = node_map.values().cloned().collect();
 
     // Process hyperedges and convert sources and targets to Node instances
-    let hyperedges = json_olog.hyperedges.into_iter().map(|json_hyperedge| {
-        let hyperedge_id = *id_map.entry(json_hyperedge.id.clone()).or_insert_with(Uuid::new_v4);
-        let sources = json_hyperedge.sources.iter()
-            .filter_map(|source_id| {
-                id_map.get(source_id)
-                    .and_then(|&uuid| node_map.get(&uuid).cloned())
-            })
-            .collect();
-        let targets = json_hyperedge.targets.iter()
-            .filter_map(|target_id| {
-                id_map.get(target_id)
-                    .and_then(|&uuid| node_map.get(&uuid).cloned())
-            })
-            .collect();
+    let hyperedges = json_olog
+        .hyperedges
+        .into_iter()
+        .map(|json_hyperedge| {
+            let hyperedge_id = *id_map
+                .entry(json_hyperedge.id.clone())
+                .or_insert_with(Uuid::new_v4);
+            let sources = json_hyperedge
+                .sources
+                .iter()
+                .filter_map(|source_id| {
+                    id_map
+                        .get(source_id)
+                        .and_then(|&uuid| node_map.get(&uuid).cloned())
+                })
+                .collect();
+            let targets = json_hyperedge
+                .targets
+                .iter()
+                .filter_map(|target_id| {
+                    id_map
+                        .get(target_id)
+                        .and_then(|&uuid| node_map.get(&uuid).cloned())
+                })
+                .collect();
 
-        Hyperedge {
-            id: hyperedge_id,
-            label: json_hyperedge.label,
-            source: sources,
-            target: targets,
-            citations: vec![citation.clone()],
-        }
-    }).collect();
+            Hyperedge {
+                id: hyperedge_id,
+                label: json_hyperedge.label,
+                source: sources,
+                target: targets,
+                citations: vec![citation.clone()],
+            }
+        })
+        .collect();
 
     Olog {
         id: Uuid::new_v4(),
@@ -441,13 +488,29 @@ fn merge_ologs(olog1: Olog, olog2: Olog) -> Olog {
     let find_node_by_label = |label: &str| merged_nodes.iter().find(|n| n.label == label).cloned();
 
     // Merge hyperedges
-    for hyperedge in olog1.hyperedges.into_iter().chain(olog2.hyperedges.into_iter()) {
-        let source_nodes = hyperedge.source.iter().filter_map(|node| find_node_by_label(&node.label)).collect::<Vec<Node>>();
-        let target_nodes = hyperedge.target.iter().filter_map(|node| find_node_by_label(&node.label)).collect::<Vec<Node>>();
+    for hyperedge in olog1
+        .hyperedges
+        .into_iter()
+        .chain(olog2.hyperedges.into_iter())
+    {
+        let source_nodes = hyperedge
+            .source
+            .iter()
+            .filter_map(|node| find_node_by_label(&node.label))
+            .collect::<Vec<Node>>();
+        let target_nodes = hyperedge
+            .target
+            .iter()
+            .filter_map(|node| find_node_by_label(&node.label))
+            .collect::<Vec<Node>>();
 
         // Key for identifying unique hyperedges
-        let hyperedge_key = (hyperedge.label.clone(), source_nodes.clone(), target_nodes.clone());
-        
+        let hyperedge_key = (
+            hyperedge.label.clone(),
+            source_nodes.clone(),
+            target_nodes.clone(),
+        );
+
         hyperedge_map.entry(hyperedge_key).or_insert(Hyperedge {
             id: Uuid::new_v4(), // Assign a new UUID for merged hyperedge
             label: hyperedge.label,
@@ -494,7 +557,8 @@ async fn ocr_pdf_post(pdf_url: &str, replicate_api_key: &str) -> Result<String, 
         },
     };
 
-    let response = client.post("https://api.replicate.com/v1/deployments/chartierluc/nougat/predictions")
+    let response = client
+        .post("https://api.replicate.com/v1/deployments/chartierluc/nougat/predictions")
         .header("Authorization", format!("Token {}", replicate_api_key))
         .json(&req_body)
         .send()
@@ -504,10 +568,14 @@ async fn ocr_pdf_post(pdf_url: &str, replicate_api_key: &str) -> Result<String, 
     Ok(response_body.urls.get)
 }
 
-async fn ocr_pdf_get(prediction_url: &str, replicate_api_key: &str) -> Result<OcrPdfGetResponse, reqwest::Error> {
+async fn ocr_pdf_get(
+    prediction_url: &str,
+    replicate_api_key: &str,
+) -> Result<OcrPdfGetResponse, reqwest::Error> {
     let client = reqwest::Client::new();
 
-    let response = client.get(prediction_url)
+    let response = client
+        .get(prediction_url)
         .header("Authorization", format!("Token {}", replicate_api_key))
         .send()
         .await?;
@@ -516,7 +584,10 @@ async fn ocr_pdf_get(prediction_url: &str, replicate_api_key: &str) -> Result<Oc
     Ok(response_body)
 }
 
-async fn ocr_pdf_poll(prediction_url: String, replicate_api_key: String) -> Result<String, Box<dyn std::error::Error>> {
+async fn ocr_pdf_poll(
+    prediction_url: String,
+    replicate_api_key: String,
+) -> Result<String, Box<dyn std::error::Error>> {
     let timeout_duration = Duration::from_secs(240); // 4 minutes
 
     timeout(timeout_duration, async {
@@ -529,7 +600,8 @@ async fn ocr_pdf_poll(prediction_url: String, replicate_api_key: String) -> Resu
                 _ => tokio::time::sleep(tokio::time::Duration::from_secs(1)).await,
             }
         }
-    }).await?
+    })
+    .await?
 }
 
 async fn fetch_text_from_url(url: &str) -> Result<String, reqwest::Error> {
@@ -539,7 +611,10 @@ async fn fetch_text_from_url(url: &str) -> Result<String, reqwest::Error> {
     response.text().await
 }
 
-async fn process_paper_and_generate_olog(paper_url: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_paper_and_generate_olog(
+    paper_url: &str,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let replicate_api_key = env::var("REPLICATE_API_TOKEN")
         .map_err(|_| "REPLICATE_API_TOKEN environment variable not set")?;
 
@@ -560,7 +635,10 @@ async fn process_paper_and_generate_olog(paper_url: &str, count: usize) -> Resul
 
     if let Some(final_olog) = merged_olog {
         write_olog_to_db(&final_olog)?;
-        println!("Merged Olog written to database successfully. UUID: {:?}", final_olog.id);
+        println!(
+            "Merged Olog written to database successfully. UUID: {:?}",
+            final_olog.id
+        );
     }
 
     Ok(())
@@ -568,26 +646,42 @@ async fn process_paper_and_generate_olog(paper_url: &str, count: usize) -> Resul
 
 fn convert_olog_to_json(olog: &Olog) -> JsonOlogSchema {
     // Convert Nodes
-    let json_nodes: Vec<JsonNodeSchema> = olog.nodes.iter().map(|node| {
-        JsonNodeSchema {
-            id: node.id.to_string(), // Assuming each node has a unique identifier
-            label: node.label.clone(),
-        }
-    }).collect();
+    let json_nodes: Vec<JsonNodeSchema> = olog
+        .nodes
+        .iter()
+        .map(|node| {
+            JsonNodeSchema {
+                id: node.id.to_string(), // Assuming each node has a unique identifier
+                label: node.label.clone(),
+            }
+        })
+        .collect();
 
     // Convert Hyperedges
-    let json_hyperedges: Vec<JsonHyperedgeSchema> = olog.hyperedges.iter().map(|hyperedge| {
-        JsonHyperedgeSchema {
-            id: hyperedge.id.to_string(), // Assuming each hyperedge has a unique identifier
-            label: hyperedge.label.clone(),
-            sources: hyperedge.source.iter().map(|node| node.id.to_string()).collect(),
-            targets: hyperedge.target.iter().map(|node| node.id.to_string()).collect(),
-        }
-    }).collect();
+    let json_hyperedges: Vec<JsonHyperedgeSchema> = olog
+        .hyperedges
+        .iter()
+        .map(|hyperedge| {
+            JsonHyperedgeSchema {
+                id: hyperedge.id.to_string(), // Assuming each hyperedge has a unique identifier
+                label: hyperedge.label.clone(),
+                sources: hyperedge
+                    .source
+                    .iter()
+                    .map(|node| node.id.to_string())
+                    .collect(),
+                targets: hyperedge
+                    .target
+                    .iter()
+                    .map(|node| node.id.to_string())
+                    .collect(),
+            }
+        })
+        .collect();
 
     // Construct the final JsonOlogSchema
     JsonOlogSchema {
-        title: olog.title.clone(),  // Assuming the title is a direct copy
+        title: olog.title.clone(), // Assuming the title is a direct copy
         nodes: json_nodes,
         hyperedges: json_hyperedges,
     }
@@ -616,42 +710,66 @@ fn main() {
         .subcommand(
             SubCommand::with_name("generate-olog")
                 .about("Generates an Olog from a given markdown file")
-                .arg(Arg::with_name("FILE")
-                    .help("The path to the markdown file")
-                    .required(true)
-                    .takes_value(true)),
+                .arg(
+                    Arg::with_name("FILE")
+                        .help("The path to the markdown file")
+                        .required(true)
+                        .takes_value(true),
+                ),
         )
         .subcommand(
             SubCommand::with_name("merge-ologs")
-            .about("Merges two Ologs and updates the database")
-            .arg(Arg::with_name("ID1").help("The ID of the first Olog to merge").required(true))
-            .arg(Arg::with_name("ID2").help("The ID of the second Olog to merge").required(true)),
+                .about("Merges two Ologs and updates the database")
+                .arg(
+                    Arg::with_name("ID1")
+                        .help("The ID of the first Olog to merge")
+                        .required(true),
+                )
+                .arg(
+                    Arg::with_name("ID2")
+                        .help("The ID of the second Olog to merge")
+                        .required(true),
+                ),
         )
         .subcommand(
             SubCommand::with_name("read-db")
                 .about("Reads an Olog from the database")
-                .arg(Arg::with_name("ID").help("The ID of the Olog to read").required(true)),
+                .arg(
+                    Arg::with_name("ID")
+                        .help("The ID of the Olog to read")
+                        .required(true),
+                ),
         )
         .subcommand(
             SubCommand::with_name("process-paper")
                 .about("Processes a paper from a given URL and adds an Olog to the database")
-                .arg(Arg::with_name("URL")
-                    .help("The URL of the paper to process")
-                    .required(true)
-                    .takes_value(true))
-                .arg(Arg::with_name("COUNT")
-                    .help("Number of times to generate an Olog")
-                    .required(true)
-                    .takes_value(true)
-                    .validator(|v| v.parse::<usize>().map(|_| ()).map_err(|_| "COUNT must be an integer")))
+                .arg(
+                    Arg::with_name("URL")
+                        .help("The URL of the paper to process")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("COUNT")
+                        .help("Number of times to generate an Olog")
+                        .required(true)
+                        .takes_value(true)
+                        .validator(|v| {
+                            v.parse::<usize>()
+                                .map(|_| ())
+                                .map_err(|_| "COUNT must be an integer")
+                        }),
+                ),
         )
         .subcommand(
             SubCommand::with_name("olog-json")
                 .about("Fetches an Olog from the database and outputs its json hypergraph")
-                .arg(Arg::with_name("UUID")
-                    .help("The UUID of the Olog to fetch")
-                    .required(true)
-                    .takes_value(true)),
+                .arg(
+                    Arg::with_name("UUID")
+                        .help("The UUID of the Olog to fetch")
+                        .required(true)
+                        .takes_value(true),
+                ),
         )
         .get_matches();
 
@@ -663,7 +781,7 @@ fn main() {
                 Err(e) => {
                     eprintln!("Failed to read file '{}': {}", file_path, e);
                     return;
-                },
+                }
             };
 
             let olog = match generate_olog(text) {
@@ -671,36 +789,48 @@ fn main() {
                 Err(e) => {
                     eprintln!("An error occurred in generating Olog: {}", e);
                     return;
-                },
+                }
             };
 
             match write_olog_to_db(&olog) {
                 Ok(_) => println!("Olog written to database successfully. UUID: {:?}", olog.id),
                 Err(e) => eprintln!("Error writing Olog to database: {}", e),
             }
-        },
+        }
         Some(("merge-ologs", sub_m)) => {
             let id1_str = sub_m.value_of("ID1").unwrap();
             let id2_str = sub_m.value_of("ID2").unwrap();
 
             let olog1_id = match Uuid::parse_str(id1_str) {
                 Ok(uuid) => uuid,
-                Err(_) => { eprintln!("Invalid UUID format for ID1"); return; }
+                Err(_) => {
+                    eprintln!("Invalid UUID format for ID1");
+                    return;
+                }
             };
 
             let olog2_id = match Uuid::parse_str(id2_str) {
                 Ok(uuid) => uuid,
-                Err(_) => { eprintln!("Invalid UUID format for ID2"); return; }
+                Err(_) => {
+                    eprintln!("Invalid UUID format for ID2");
+                    return;
+                }
             };
 
             let olog1 = match read_olog_from_db(olog1_id) {
                 Ok(olog) => olog,
-                Err(e) => { eprintln!("Error reading Olog1 from database: {}", e); return; }
+                Err(e) => {
+                    eprintln!("Error reading Olog1 from database: {}", e);
+                    return;
+                }
             };
 
             let olog2 = match read_olog_from_db(olog2_id) {
                 Ok(olog) => olog,
-                Err(e) => { eprintln!("Error reading Olog2 from database: {}", e); return; }
+                Err(e) => {
+                    eprintln!("Error reading Olog2 from database: {}", e);
+                    return;
+                }
             };
 
             let merged_olog = merge_ologs(olog1, olog2);
@@ -716,10 +846,13 @@ fn main() {
             }
 
             match write_olog_to_db(&merged_olog) {
-                Ok(_) => println!("Merged Olog written to database successfully. UUID: {:?}", merged_olog.id),
+                Ok(_) => println!(
+                    "Merged Olog written to database successfully. UUID: {:?}",
+                    merged_olog.id
+                ),
                 Err(e) => eprintln!("Error writing merged Olog to database: {}", e),
             }
-        },
+        }
         Some(("read-db", sub_m)) => {
             let id = sub_m.value_of("ID").unwrap().to_string();
             match Uuid::parse_str(&id) {
@@ -729,25 +862,25 @@ fn main() {
                 },
                 Err(_) => eprintln!("Invalid UUID format"),
             }
-        },
+        }
         Some(("process-paper", sub_m)) => {
             let paper_url = sub_m.value_of("URL").unwrap();
             let count = sub_m.value_of("COUNT").unwrap().parse::<usize>().unwrap();
-        
+
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 if let Err(e) = process_paper_and_generate_olog(paper_url, count).await {
                     eprintln!("Error processing paper: {}", e);
                 }
             });
-        },
+        }
         Some(("olog-json", sub_m)) => {
             let uuid = sub_m.value_of("UUID").unwrap();
-    
+
             match fetch_and_format_olog_hypergraph(uuid) {
                 Ok(json_str) => println!("{}", json_str),
                 Err(e) => eprintln!("Error fetching Olog: {}", e),
             }
-        },
+        }
         _ => eprintln!("Invalid command"),
     }
 }
